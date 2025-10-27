@@ -70,7 +70,8 @@ palette_hex = [
     "ff00ff", "ff24ff", "ff48ff", "ff6cff", "ff90ff", "ffb4ff", "ffd8ff", "ffffff"
 ]
 
-# --- Funções de cor (mantidas) ---
+
+# --- Funções de cor ---
 def hex_to_rgb(hex_str):
     return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
 
@@ -106,23 +107,44 @@ def rgb_to_oklab(r, g, b):
     x, y, z = rgb_to_xyz(r, g, b)
     return xyz_to_oklab(x, y, z)
 
-def find_closest_in_palette(rgb_color, palette):
-    lab_input = rgb_to_oklab(*rgb_color)
-    best_dist = float('inf')
-    best_rgb = (0, 0, 0)
-    for hex_color in palette:
-        r, g, b = hex_to_rgb(hex_color)
-        try:
-            lab = rgb_to_oklab(r, g, b)
-            dist = (lab[0]-lab_input[0])**2 + (lab[1]-lab_input[1])**2 + (lab[2]-lab_input[2])**2
-            if dist < best_dist:
-                best_dist = dist
-                best_rgb = (r, g, b)
-        except:
-            continue
-    return best_rgb
+def rgb_to_hsv(r, g, b):
+    r, g, b = r / 255.0, g / 255.0, b / 255.0
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    df = mx - mn
+    if mx == mn:
+        h = 0
+    elif mx == r:
+        h = (60 * ((g - b) / df) + 360) % 360
+    elif mx == g:
+        h = (60 * ((b - r) / df) + 120) % 360
+    else:
+        h = (60 * ((r - g) / df) + 240) % 360
+    s = 0 if mx == 0 else df / mx
+    v = mx
+    return h, s, v
 
-def generate_gradient(hex1, hex2, steps, palette, method="RGB"):
+def hsv_to_rgb(h, s, v):
+    c = v * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = v - c
+    if 0 <= h < 60:
+        r, g, b = c, x, 0
+    elif 60 <= h < 120:
+        r, g, b = x, c, 0
+    elif 120 <= h < 180:
+        r, g, b = 0, c, x
+    elif 180 <= h < 240:
+        r, g, b = 0, x, c
+    elif 240 <= h < 300:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+    r, g, b = (r + m) * 255, (g + m) * 255, (b + m) * 255
+    return int(round(r)), int(round(g)), int(round(b))
+
+# --- Geração de gradiente (CORRIGIDA) ---
+def generate_gradient(hex1, hex2, steps, palette, interp_method="RGB", match_method="RGB"):
     try:
         rgb1 = hex_to_rgb(hex1)
         rgb2 = hex_to_rgb(hex2)
@@ -133,101 +155,130 @@ def generate_gradient(hex1, hex2, steps, palette, method="RGB"):
     for i in range(steps):
         t = i / (steps - 1) if steps > 1 else 0.0
 
-        if method == "RGB":
-            # Interpolação linear em RGB (mais previsível para arte)
+        if interp_method == "RGB":
+            r = int(rgb1[0] + t * (rgb2[0] - rgb1[0]))
+            g = int(rgb1[1] + t * (rgb2[1] - rgb1[1]))
+            b = int(rgb1[2] + t * (rgb2[2] - rgb1[2]))
+            target_rgb = (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+
+        elif interp_method == "HSV":
+            h1, s1, v1 = rgb_to_hsv(*rgb1)
+            h2, s2, v2 = rgb_to_hsv(*rgb2)
+
+            dh = h2 - h1
+            if dh > 180:
+                dh -= 360
+            elif dh < -180:
+                dh += 360
+            h = (h1 + t * dh) % 360
+            s = s1 + t * (s2 - s1)
+            v = v1 + t * (v2 - v1)
+            target_rgb = hsv_to_rgb(h, s, v)
+
+        elif interp_method == "OkLab":
+            # Interpolar em OkLab, mas manter target_rgb como referência visual
             r = int(rgb1[0] + t * (rgb2[0] - rgb1[0]))
             g = int(rgb1[1] + t * (rgb2[1] - rgb1[1]))
             b = int(rgb1[2] + t * (rgb2[2] - rgb1[2]))
             target_rgb = (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
         else:
-            # OkLab (mantido para comparação)
-            lab1 = rgb_to_oklab(*rgb1)
-            lab2 = rgb_to_oklab(*rgb2)
-            L = lab1[0] + t * (lab2[0] - lab1[0])
-            a = lab1[1] + t * (lab2[1] - lab1[1])
-            b_val = lab1[2] + t * (lab2[2] - lab1[2])
-            # Aproximar com RGB para busca
-            r = int(rgb1[0] + t * (rgb2[0] - rgb1[0]))
-            g = int(rgb1[1] + t * (rgb2[1] - rgb1[1]))
-            b = int(rgb1[2] + t * (rgb2[2] - rgb1[2]))
-            target_rgb = (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+            target_rgb = rgb1
 
-        # --- Filtragem inteligente: só cores com matiz compatível ---
-        r_in, g_in, b_in = target_rgb
-        diff_in = max(r_in, g_in, b_in) - min(r_in, g_in, b_in)
-        input_is_gray = diff_in < 20
+        # >>> USAR SEMPRE A PALETA COMPLETA <<<
+        filtered_palette = palette
 
-        filtered_palette = []
-        for hex_color in palette:
-            r, g, b = hex_to_rgb(hex_color)
-            diff_pal = max(r, g, b) - min(r, g, b)
-            is_gray = diff_pal < 20
-
-            if input_is_gray:
-                if is_gray:
-                    filtered_palette.append(hex_color)
-            else:
-                if is_gray:
-                    continue
-                # Canal dominante da cor alvo
-                if r_in >= g_in and r_in >= b_in:
-                    if r >= g and r >= b:
-                        filtered_palette.append(hex_color)
-                elif g_in >= r_in and g_in >= b_in:
-                    if g >= r and g >= b:
-                        filtered_palette.append(hex_color)
-                else:  # blue dominant
-                    if b >= r and b >= g:
-                        filtered_palette.append(hex_color)
-
-        if not filtered_palette:
-            filtered_palette = palette
-
-        # Encontrar mais próxima na paleta filtrada
-        best = target_rgb
+        best = None
         best_dist = float('inf')
-        for hex_color in filtered_palette:
-            r, g, b = hex_to_rgb(hex_color)
-            dist = (r - r_in)**2 + (g - g_in)**2 + (b - b_in)**2
-            if dist < best_dist:
-                best_dist = dist
-                best = (r, g, b)
+
+        if match_method == "RGB":
+            for hex_color in filtered_palette:
+                r, g, b = hex_to_rgb(hex_color)
+                dist = (r - target_rgb[0])**2 + (g - target_rgb[1])**2 + (b - target_rgb[2])**2
+                if dist < best_dist:
+                    best_dist = dist
+                    best = (r, g, b)
+
+        elif match_method == "HSV":
+            h_in, s_in, v_in = rgb_to_hsv(*target_rgb)
+            for hex_color in filtered_palette:
+                r, g, b = hex_to_rgb(hex_color)
+                h, s, v = rgb_to_hsv(r, g, b)
+                dh = min(abs(h - h_in), 360 - abs(h - h_in))
+                ds = abs(s - s_in)
+                dv = abs(v - v_in)
+                dist = dh**2 + (255 * ds)**2 + (255 * dv)**2
+                if dist < best_dist:
+                    best_dist = dist
+                    best = (r, g, b)
+
+        elif match_method == "OkLab":
+            lab_input = rgb_to_oklab(*target_rgb)
+            for hex_color in filtered_palette:
+                r, g, b = hex_to_rgb(hex_color)
+                try:
+                    lab = rgb_to_oklab(r, g, b)
+                    dist = (lab[0]-lab_input[0])**2 + (lab[1]-lab_input[1])**2 + (lab[2]-lab_input[2])**2
+                    if dist < best_dist:
+                        best_dist = dist
+                        best = (r, g, b)
+                except:
+                    continue
+
+        if best is None:
+            best = hex_to_rgb(palette[0])
         gradient.append(best)
 
     return gradient
 
-# --- Interface com rolagem ---
+# --- Interface Gráfica ---
 class FullGradientApp:
     def __init__(self, root):
         self.root = root
         root.title("Gerador de Gradiente SGDK")
-        root.geometry("520x780")  # um pouco mais alto para caber 16 linhas (64/8 = 8 linhas de cores + labels = ~16)
+        root.geometry("580x780")
         root.resizable(False, False)
 
-        # Entradas
         input_frame = tk.Frame(root)
         input_frame.pack(pady=10)
 
-        tk.Label(input_frame, text="Cor inicial:").grid(row=0, column=0, padx=5)
+        tk.Label(input_frame, text="Cor inicial:").grid(row=0, column=0, padx=5, sticky="e")
         self.entry1 = tk.Entry(input_frame, width=10)
         self.entry1.grid(row=0, column=1, padx=5)
 
-        tk.Label(input_frame, text="Cor final:").grid(row=0, column=2, padx=5)
+        tk.Label(input_frame, text="Cor final:").grid(row=0, column=2, padx=5, sticky="e")
         self.entry2 = tk.Entry(input_frame, width=10)
         self.entry2.grid(row=0, column=3, padx=5)
 
-        tk.Label(input_frame, text="Passos:").grid(row=0, column=4, padx=5)
+        tk.Label(input_frame, text="Passos:").grid(row=0, column=4, padx=5, sticky="e")
         self.steps_var = tk.StringVar(value="16")
         self.steps_spin = tk.Spinbox(input_frame, from_=2, to=64, width=5, textvariable=self.steps_var)
         self.steps_spin.grid(row=0, column=5, padx=5)
 
-        tk.Button(input_frame, text="Gerar Degradê", command=self.generate).grid(row=0, column=6, padx=10)
+        tk.Label(input_frame, text="Método:").grid(row=2, column=0, padx=5, sticky="e")
+        self.method_var = tk.StringVar(value="RGB")
+        self.method_combo = ttk.Combobox(
+            input_frame,
+            textvariable=self.method_var,
+            values=["RGB", "HSV", "OkLab"],
+            state="readonly",
+            width=8
+        )
+        self.method_combo.grid(row=2, column=1, padx=5)
 
-        # Área fixa para 64 cores (8 colunas x 16 linhas = 128 widgets: frame + entry)
+        self.unique_var = tk.BooleanVar(value=False)
+        self.unique_check = tk.Checkbutton(
+            input_frame,
+            text="Cores únicas",
+            variable=self.unique_var
+        )
+        self.unique_check.grid(row=2, column=2, columnspan=2, padx=5, sticky="w")
+
+        tk.Button(input_frame, text="Gerar Degradê", command=self.generate).grid(row=0, column=6, padx=10, rowspan=2)
+
         self.result_frame = tk.Frame(root)
         self.result_frame.pack(pady=10)
 
-        self.bg_empty = "#f0f0f0"  # cor de fundo neutro
+        self.bg_empty = "#f0f0f0"
         self.frames = []
         self.entries = []
 
@@ -237,12 +288,10 @@ class FullGradientApp:
             row = (i // cols) * 2
             col = i % cols
 
-            # Frame de cor
             frame = tk.Frame(self.result_frame, width=50, height=50, bg=self.bg_empty, relief="sunken", bd=1)
             frame.grid(row=row, column=col, padx=3, pady=3)
             frame.pack_propagate(False)
 
-            # Entry HEX
             entry = tk.Entry(self.result_frame, width=8, font=("Arial", 8), justify="center")
             entry.grid(row=row+1, column=col, padx=3, pady=1)
             entry.config(state="normal")
@@ -252,8 +301,6 @@ class FullGradientApp:
             self.frames.append(frame)
             self.entries.append(entry)
 
-        # Permitir seleção em todos os entries (mesmo vazios)
-        for entry, frame in zip(self.entries, self.frames):
             entry.bind("<Button-1>", lambda e, en=entry: self.select_entry(en))
             frame.bind("<Button-1>", lambda e, en=entry: self.select_entry(en))
 
@@ -273,13 +320,22 @@ class FullGradientApp:
             messagebox.showerror("Erro", "Passos devem estar entre 2 e 64.")
             return
 
+        method = self.method_var.get()
         try:
-            gradient = generate_gradient(hex1, hex2, steps, palette_hex)
+            gradient = generate_gradient(hex1, hex2, steps, palette_hex, interp_method=method, match_method=method)
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao gerar degradê:\n{str(e)}")
             return
 
-        # Preencher os primeiros 'steps'
+        if self.unique_var.get():
+            unique_gradient = []
+            last = None
+            for rgb in gradient:
+                if rgb != last:
+                    unique_gradient.append(rgb)
+                    last = rgb
+            gradient = unique_gradient
+
         for i in range(64):
             if i < len(gradient):
                 rgb = gradient[i]
@@ -296,7 +352,6 @@ class FullGradientApp:
                     fg=fg_color
                 )
             else:
-                # Limpar (restaurar estado neutro)
                 self.frames[i].config(bg=self.bg_empty)
                 self.entries[i].config(state="normal")
                 self.entries[i].delete(0, tk.END)
@@ -310,7 +365,6 @@ class FullGradientApp:
         entry.focus()
         entry.select_range(0, tk.END)
 
-# --- Executar ---
 if __name__ == "__main__":
     root = tk.Tk()
     app = FullGradientApp(root)
