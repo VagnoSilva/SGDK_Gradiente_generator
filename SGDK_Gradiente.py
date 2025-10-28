@@ -1,9 +1,21 @@
+# --- DPI AWARENESS: PRIMEIRA COISA NO SCRIPT ---
+import ctypes
+import sys
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Windows 8.1+
+except:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()   # Windows Vista+
+    except:
+        pass  # ignora em sistemas antigos
+
+# --- Demais imports (só após DPI awareness) ---
 import tkinter as tk
 from tkinter import messagebox, ttk
 import math
 import threading
 import time
-import ctypes
 from ctypes import wintypes
 
 # ========== PALETA SGDK COMPLETA (512 cores 3-3-3 bits) ==========
@@ -146,24 +158,21 @@ def hsv_to_rgb(h, s, v):
     r, g, b = (r + m) * 255, (g + m) * 255, (b + m) * 255
     return int(round(r)), int(round(g)), int(round(b))
 
-# --- Captura de cor nativa do Windows ---
-def get_pixel_color(x, y):
-    """Obtém a cor RGB de um pixel na posição (x, y) na tela (Windows only)"""
-    hdc = ctypes.windll.user32.GetDC(0)
-    color = ctypes.windll.gdi32.GetPixel(hdc, x, y)
-    ctypes.windll.user32.ReleaseDC(0, hdc)
+# --- Função de captura de pixel (Windows-only) ---
+def get_pixel_color_windows(x, y):
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    hdc = user32.GetDC(0)
+    if not hdc:
+        raise RuntimeError("Falha ao obter contexto de dispositivo.")
+    color = gdi32.GetPixel(hdc, int(x), int(y))
+    user32.ReleaseDC(0, hdc)
     if color == -1:
-        raise RuntimeError("Falha ao capturar pixel")
-    b = color & 0xFF
+        raise RuntimeError("GetPixel falhou.")
+    r = color & 0xFF
     g = (color >> 8) & 0xFF
-    r = (color >> 16) & 0xFF
+    b = (color >> 16) & 0xFF
     return (r, g, b)
-
-def get_cursor_pos():
-    """Obtém a posição atual do cursor do mouse"""
-    point = wintypes.POINT()
-    ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
-    return point.x, point.y
 
 # --- Geração de gradiente ---
 def generate_gradient(hex1, hex2, steps, palette, interp_method="RGB", match_method="RGB"):
@@ -186,12 +195,9 @@ def generate_gradient(hex1, hex2, steps, palette, interp_method="RGB", match_met
         elif interp_method == "HSV":
             h1, s1, v1 = rgb_to_hsv(*rgb1)
             h2, s2, v2 = rgb_to_hsv(*rgb2)
-
             dh = h2 - h1
-            if dh > 180:
-                dh -= 360
-            elif dh < -180:
-                dh += 360
+            if dh > 180: dh -= 360
+            elif dh < -180: dh += 360
             h = (h1 + t * dh) % 360
             s = s1 + t * (s2 - s1)
             v = v1 + t * (v2 - v1)
@@ -205,9 +211,9 @@ def generate_gradient(hex1, hex2, steps, palette, interp_method="RGB", match_met
         else:
             target_rgb = rgb1
 
-        filtered_palette = palette
         best = None
         best_dist = float('inf')
+        filtered_palette = palette
 
         if match_method == "RGB":
             for hex_color in filtered_palette:
@@ -260,7 +266,6 @@ class FullGradientApp:
         input_frame = tk.Frame(root)
         input_frame.pack(pady=10)
 
-        # Frame para cores iniciais e finais com botões de captura
         color_selection_frame = tk.Frame(input_frame)
         color_selection_frame.grid(row=0, column=0, columnspan=7, pady=5)
 
@@ -276,7 +281,6 @@ class FullGradientApp:
         self.pick_color2_btn = tk.Button(color_selection_frame, text="Pick Color", command=lambda: self.start_color_pick(2))
         self.pick_color2_btn.grid(row=0, column=5, padx=5)
 
-        # Frame para outros controles
         controls_frame = tk.Frame(input_frame)
         controls_frame.grid(row=1, column=0, columnspan=7, pady=5)
 
@@ -336,6 +340,8 @@ class FullGradientApp:
             frame.bind("<Button-1>", lambda e, en=entry: self.select_entry(en))
 
         self.picking = False
+        self.color_pick_target = None
+        self.pick_window = None
 
     def start_color_pick(self, target):
         if self.picking:
@@ -344,60 +350,61 @@ class FullGradientApp:
         self.color_pick_target = target
 
         self.pick_window = tk.Toplevel(self.root)
-        self.pick_window.title("Selecionar Cor")
-        self.pick_window.geometry("300x100")
+        self.pick_window.title("Capturar Cor")
+        self.pick_window.geometry("320x100")
         self.pick_window.transient(self.root)
         self.pick_window.grab_set()
+        tk.Label(
+            self.pick_window,
+            text="Clique com o botão ESQUERDO em qualquer lugar da tela para capturar a cor.",
+            wraplength=300,
+            justify="center"
+        ).pack(pady=15)
+        tk.Button(self.pick_window, text="Cancelar", command=self.cancel_color_pick).pack()
 
-        tk.Label(self.pick_window, text="Clique em qualquer lugar da tela para capturar a cor", font=("Arial", 10)).pack(pady=20)
-        tk.Button(self.pick_window, text="Cancelar", command=self.cancel_color_pick).pack(pady=5)
+        threading.Thread(target=self._wait_for_click, daemon=True).start()
 
-        # Iniciar thread de espera por clique esquerdo
-        thread = threading.Thread(target=self.wait_for_left_click, daemon=True)
-        thread.start()
-
-    def wait_for_left_click(self):
-        """Aguarda clique esquerdo usando GetAsyncKeyState (Windows only)"""
+    def _wait_for_click(self):
         user32 = ctypes.windll.user32
         while self.picking:
-            if user32.GetAsyncKeyState(0x01) & 0x8000:  # VK_LBUTTON
-                time.sleep(0.1)  # debounce
+            if user32.GetAsyncKeyState(0x01) & 0x8000:
+                time.sleep(0.05)  # debounce
                 if not self.picking:
                     break
                 try:
-                    x, y = get_cursor_pos()
-                    rgb = get_pixel_color(x, y)
+                    point = wintypes.POINT()
+                    user32.GetCursorPos(ctypes.byref(point))
+                    rgb = get_pixel_color_windows(point.x, point.y)
                     hex_color = rgb_to_hex(rgb).upper()
-                    self.root.after(0, self.finish_pick, hex_color)
+                    self.root.after(0, self.update_color_entry, hex_color)
                 except Exception as e:
-                    self.root.after(0, self.fail_pick, str(e))
+                    self.root.after(0, lambda e=e: messagebox.showerror("Erro", f"Falha ao capturar cor:\n{e}"))
                 break
             time.sleep(0.01)
+        self.root.after(0, self._cleanup_pick)
 
-    def finish_pick(self, hex_color):
+    def update_color_entry(self, hex_color):
         if self.color_pick_target == 1:
             self.entry1.delete(0, tk.END)
             self.entry1.insert(0, hex_color)
         elif self.color_pick_target == 2:
             self.entry2.delete(0, tk.END)
             self.entry2.insert(0, hex_color)
-        self.cleanup_pick()
 
-    def fail_pick(self, error):
-        messagebox.showerror("Erro", f"Falha ao capturar cor:\n{error}")
-        self.cleanup_pick()
-
-    def cleanup_pick(self):
+    def _cleanup_pick(self):
         self.picking = False
-        if hasattr(self, 'pick_window') and self.pick_window:
-            self.pick_window.destroy()
+        if self.pick_window:
+            try:
+                self.pick_window.grab_release()
+                self.pick_window.destroy()
+            except:
+                pass
             self.pick_window = None
+        self.color_pick_target = None
 
     def cancel_color_pick(self):
         self.picking = False
-        if hasattr(self, 'pick_window') and self.pick_window:
-            self.pick_window.destroy()
-            self.pick_window = None
+        self._cleanup_pick()
 
     def generate(self):
         hex1 = self.entry1.get().strip().upper()
