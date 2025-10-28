@@ -1,6 +1,9 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 import math
+from pynput import mouse
+from PIL import ImageGrab
+import threading
 
 # ========== PALETA SGDK COMPLETA (512 cores 3-3-3 bits) ==========
 palette_hex = [
@@ -69,7 +72,6 @@ palette_hex = [
     "d800ff", "d824ff", "d848ff", "d86cff", "d890ff", "d8b4ff", "d8d8ff", "d8ffff",
     "ff00ff", "ff24ff", "ff48ff", "ff6cff", "ff90ff", "ffb4ff", "ffd8ff", "ffffff"
 ]
-
 
 # --- Funções de cor ---
 def hex_to_rgb(hex_str):
@@ -241,39 +243,51 @@ class FullGradientApp:
         input_frame = tk.Frame(root)
         input_frame.pack(pady=10)
 
-        tk.Label(input_frame, text="Cor inicial:").grid(row=0, column=0, padx=5, sticky="e")
-        self.entry1 = tk.Entry(input_frame, width=10)
+        # Frame para cores iniciais e finais com botões de captura
+        color_selection_frame = tk.Frame(input_frame)
+        color_selection_frame.grid(row=0, column=0, columnspan=7, pady=5)
+
+        tk.Label(color_selection_frame, text="Cor inicial:").grid(row=0, column=0, padx=5, sticky="e")
+        self.entry1 = tk.Entry(color_selection_frame, width=10)
         self.entry1.grid(row=0, column=1, padx=5)
+        self.pick_color1_btn = tk.Button(color_selection_frame, text="Pick Color", command=lambda: self.start_color_pick(1))
+        self.pick_color1_btn.grid(row=0, column=2, padx=5)
 
-        tk.Label(input_frame, text="Cor final:").grid(row=0, column=2, padx=5, sticky="e")
-        self.entry2 = tk.Entry(input_frame, width=10)
-        self.entry2.grid(row=0, column=3, padx=5)
+        tk.Label(color_selection_frame, text="Cor final:").grid(row=0, column=3, padx=5, sticky="e")
+        self.entry2 = tk.Entry(color_selection_frame, width=10)
+        self.entry2.grid(row=0, column=4, padx=5)
+        self.pick_color2_btn = tk.Button(color_selection_frame, text="Pick Color", command=lambda: self.start_color_pick(2))
+        self.pick_color2_btn.grid(row=0, column=5, padx=5)
 
-        tk.Label(input_frame, text="Passos:").grid(row=0, column=4, padx=5, sticky="e")
+        # Frame para outros controles
+        controls_frame = tk.Frame(input_frame)
+        controls_frame.grid(row=1, column=0, columnspan=7, pady=5)
+
+        tk.Label(controls_frame, text="Passos:").grid(row=0, column=0, padx=5, sticky="e")
         self.steps_var = tk.StringVar(value="16")
-        self.steps_spin = tk.Spinbox(input_frame, from_=2, to=64, width=5, textvariable=self.steps_var)
-        self.steps_spin.grid(row=0, column=5, padx=5)
+        self.steps_spin = tk.Spinbox(controls_frame, from_=2, to=64, width=5, textvariable=self.steps_var)
+        self.steps_spin.grid(row=0, column=1, padx=5)
 
-        tk.Label(input_frame, text="Método:").grid(row=2, column=0, padx=5, sticky="e")
+        tk.Label(controls_frame, text="Método:").grid(row=0, column=2, padx=5, sticky="e")
         self.method_var = tk.StringVar(value="RGB")
         self.method_combo = ttk.Combobox(
-            input_frame,
+            controls_frame,
             textvariable=self.method_var,
             values=["RGB", "HSV", "OkLab"],
             state="readonly",
             width=8
         )
-        self.method_combo.grid(row=2, column=1, padx=5)
+        self.method_combo.grid(row=0, column=3, padx=5)
 
         self.unique_var = tk.BooleanVar(value=False)
         self.unique_check = tk.Checkbutton(
-            input_frame,
+            controls_frame,
             text="Cores únicas",
             variable=self.unique_var
         )
-        self.unique_check.grid(row=2, column=2, columnspan=2, padx=5, sticky="w")
+        self.unique_check.grid(row=0, column=4, padx=5, sticky="w")
 
-        tk.Button(input_frame, text="Gerar Degradê", command=self.generate).grid(row=0, column=6, padx=10, rowspan=2)
+        tk.Button(controls_frame, text="Gerar Degradê", command=self.generate).grid(row=0, column=5, padx=10)
 
         self.result_frame = tk.Frame(root)
         self.result_frame.pack(pady=10)
@@ -303,6 +317,73 @@ class FullGradientApp:
 
             entry.bind("<Button-1>", lambda e, en=entry: self.select_entry(en))
             frame.bind("<Button-1>", lambda e, en=entry: self.select_entry(en))
+
+        # Variáveis para controle da captura de cor
+        self.color_pick_target = None  # 1 para cor inicial, 2 para cor final
+        self.mouse_listener = None
+        self.pick_window = None
+
+    def start_color_pick(self, target):
+        """Inicia o processo de captura de cor da tela"""
+        self.color_pick_target = target
+        
+        # Criar janela de instruções
+        self.pick_window = tk.Toplevel(self.root)
+        self.pick_window.title("Selecionar Cor")
+        self.pick_window.geometry("300x100")
+        self.pick_window.transient(self.root)
+        self.pick_window.grab_set()
+        
+        tk.Label(self.pick_window, text="Clique em qualquer lugar da tela para capturar a cor", 
+                font=("Arial", 10)).pack(pady=20)
+        
+        tk.Button(self.pick_window, text="Cancelar", command=self.cancel_color_pick).pack(pady=5)
+        
+        # Iniciar listener do mouse em uma thread separada
+        self.start_mouse_listener()
+
+    def start_mouse_listener(self):
+        """Inicia o listener do mouse em uma thread separada"""
+        def listen_for_click():
+            with mouse.Listener(on_click=self.on_mouse_click) as listener:
+                listener.join()
+        
+        thread = threading.Thread(target=listen_for_click, daemon=True)
+        thread.start()
+
+    def on_mouse_click(self, x, y, button, pressed):
+        """Callback quando o mouse é clicado"""
+        if pressed and button == mouse.Button.left:
+            # Capturar a cor na posição do clique
+            try:
+                screenshot = ImageGrab.grab()
+                rgb = screenshot.getpixel((x, y))
+                hex_color = rgb_to_hex(rgb).upper()
+                self.root.after(0, self.update_color_entry, hex_color)
+            except Exception as e:
+                print(f"Erro ao capturar cor: {e}")
+            return False  # Parar o listener
+
+    def update_color_entry(self, hex_color):
+        """Atualiza o campo de entrada com a cor capturada"""
+        if self.color_pick_target == 1:
+            self.entry1.delete(0, tk.END)
+            self.entry1.insert(0, hex_color)
+        elif self.color_pick_target == 2:
+            self.entry2.delete(0, tk.END)
+            self.entry2.insert(0, hex_color)
+        
+        if self.pick_window:
+            self.pick_window.destroy()
+            self.pick_window = None
+        self.color_pick_target = None
+
+    def cancel_color_pick(self):
+        """Cancela o processo de captura de cor"""
+        if self.pick_window:
+            self.pick_window.destroy()
+            self.pick_window = None
+        self.color_pick_target = None
 
     def generate(self):
         hex1 = self.entry1.get().strip().upper()
